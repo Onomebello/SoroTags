@@ -790,3 +790,6 @@ See [LICENSE](LICENSE).
 
 <!-- handsoff-issue-250 -->
 - #250: [#83] Smart contract `route_batch` does not return per-recipient result status
+
+<!-- handsoff-issue-41 -->
+- #41: `AnalyticsPage.jsx` chart renders with empty state after API error instead of error message
