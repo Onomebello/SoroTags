@@ -23,7 +23,6 @@ const { asyncHandler } = require("../../middleware/asyncHandler");
 const {
   normalizeNameTag,
   validateMemo,
-  RESERVED_NAMES,
   MAX_USERNAMES_PER_ADDRESS,
   PRIMARY_USERNAME_ORDER,
   shouldFallbackToLocalRegistry,
@@ -206,9 +205,7 @@ router.post(
     }
 
     if (!StrKey.isValidEd25519PublicKey(address)) {
-      const error = new Error("Invalid Stellar Public Key format.");
-      error.statusCode = 400;
-      return next(error);
+      return next(new ApiError("INVALID_INPUT", "Invalid Stellar address"));
     }
 
     const memoError = validateMemo(memoType, memo);
@@ -217,17 +214,6 @@ router.post(
     }
 
     const normalizedUsername = username.toLowerCase();
-
-    // #171 — these guards apply to every registration slot (primary and
-    // aliases), not just the first username for an address.
-    if (RESERVED_NAMES.includes(normalizedUsername)) {
-      return next(
-        new ApiError(
-          "FORBIDDEN",
-          "This username is reserved and cannot be registered.",
-        ),
-      );
-    }
 
     if (BLOCKED_EXCHANGES.includes(address)) {
       return next(

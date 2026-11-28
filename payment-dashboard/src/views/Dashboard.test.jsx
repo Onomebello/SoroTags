@@ -234,3 +234,106 @@ describe('Dashboard – signing-failure path', () => {
     expect(mockToastSuccess).not.toHaveBeenCalled();
   });
 });
+
+describe('Dashboard – keyboard and screen reader support', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const stubBrowser = () => {
+    vi.stubGlobal('matchMedia', () => ({
+      matches: false,
+      addListener: noop,
+      removeListener: noop,
+    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ account_id: RECIPIENT_KEY }),
+        text: async () => JSON.stringify({ address: PUBLIC_KEY, username: 'alice' }),
+      }),
+    );
+  };
+
+  it('reaches recipient, amount and Send Payment in that order with no positive tabindex', () => {
+    stubBrowser();
+    const { container } = renderDashboard();
+
+    const form = screen.getByRole('form', { name: /send payment/i });
+    const focusable = Array.from(form.querySelectorAll('input, button'));
+    const sendButton = screen.getByRole('button', { name: /send payment/i });
+
+    expect(focusable).toEqual([
+      screen.getByLabelText('Recipient'),
+      screen.getByLabelText('Amount'),
+      sendButton,
+    ]);
+    expect(sendButton.hasAttribute('disabled')).toBe(false);
+    expect(sendButton.getAttribute('aria-disabled')).toBe('true');
+    expect(
+      Array.from(container.querySelectorAll('[tabindex]')).filter(
+        (element) => Number(element.getAttribute('tabindex')) > 0,
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps the status live region mounted before anything is submitted', () => {
+    stubBrowser();
+    renderDashboard();
+
+    const form = screen.getByRole('form', { name: /send payment/i });
+    const liveRegion = form.querySelector('[role="status"]');
+
+    expect(liveRegion).not.toBeNull();
+    expect(liveRegion.getAttribute('aria-live')).toBe('polite');
+    expect(liveRegion.textContent).toBe('');
+  });
+
+  it('announces missing input when the form is submitted with Enter', () => {
+    stubBrowser();
+    renderDashboard();
+
+    fireEvent.submit(screen.getByRole('form', { name: /send payment/i }));
+
+    expect(screen.getByRole('form', { name: /send payment/i }).querySelector('[role="status"]').textContent)
+      .toBe('Enter a recipient and an amount greater than zero.');
+    expect(mockRoutePayment).not.toHaveBeenCalled();
+  });
+
+  it('announces the submission result in the live region', async () => {
+    stubBrowser();
+    mockRoutePayment.mockResolvedValue({ toXDR: () => 'base64xdr==' });
+    mockSignTransaction.mockRejectedValue(new Error('User declined'));
+    renderDashboard();
+
+    fireEvent.change(screen.getByLabelText('Recipient'), {
+      target: { value: 'alice*localhost' },
+    });
+    fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '10' } });
+    fireEvent.submit(screen.getByRole('form', { name: /send payment/i }));
+
+    const form = screen.getByRole('form', { name: /send payment/i });
+    await waitFor(() =>
+      expect(form.querySelector('[role="status"]').textContent).toMatch(/User declined/),
+    );
+  });
+
+  it('closes the wallet menu on Escape and returns focus to its trigger', () => {
+    stubBrowser();
+    renderDashboard();
+
+    const trigger = screen.getByRole('button', { expanded: false });
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+
+    screen.getByRole('button', { name: 'Disconnect' }).focus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(trigger);
+  });
+});

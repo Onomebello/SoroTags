@@ -15,7 +15,7 @@ const v2Federation = require('./v2/federation');
 
 const router = express.Router();
 
-// v1 API (deprecated — see src/routes/federation.js)
+// v1 API - DEPRECATED: Use v2 for new integrations
 router.use('/v1/federation', v1Federation);
 
 // v2 API

@@ -26,7 +26,7 @@ const {
 const { getRoutingStats } = require('../../services/statsService');
 const { auditLogMiddleware } = require('../../middleware/auditLog');
 const { idempotencyMiddleware } = require('../../../middleware/idempotency');
-const { ACTIVITY_ACTIONS, recordActivity } = require('../../services/activityService');
+const { ACTIVITY_ACTIONS, recordActivity, logMany } = require('../../services/activityService');
 const { PRIMARY_USERNAME_ORDER, maskIp } = require('../../utils');
 
 
@@ -97,13 +97,18 @@ router.post('/admin/block', adminAuth, asyncHandler(async (req, res, next) => {
 
       for (const username of usernames) {
         await invalidateFederationCache(redisClient, address, username);
-        await recordActivity(prisma, {
+      }
+      // Batch the per-username activity rows into a single insert instead of
+      // one round-trip per username.
+      await logMany(
+        prisma,
+        usernames.map((username) => ({
           username,
           action: ACTIVITY_ACTIONS.USER_BLOCKED,
           metadata: { address },
           req,
-        });
-      }
+        })),
+      );
       await invalidateStatsCache(redisClient);
 
       return res.status(200).json({

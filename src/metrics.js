@@ -42,8 +42,34 @@ const webhookDlqSize = new client.Gauge({
   registers: [register],
 });
 
+const UNKNOWN_ROUTE = 'unknown';
+
+/**
+ * Normalize an Express request into a route pattern label.
+ *
+ * Uses `req.route.path` (the matched route pattern, e.g. `/users/:username/activity`)
+ * rather than `req.path` (the concrete request path, e.g. `/users/alice/activity`) so
+ * dynamic segments never leak actual values into metric labels. Requests that do not
+ * match any route fall back to the `unknown` label.
+ */
+function normalizeRoute(req) {
+  if (!req) return UNKNOWN_ROUTE;
+  const routePath = req.route && req.route.path;
+  if (typeof routePath === 'string' && routePath.length > 0) {
+    return routePath;
+  }
+  if (Array.isArray(routePath) && routePath.length > 0) {
+    return routePath[0];
+  }
+  return UNKNOWN_ROUTE;
+}
+
 function observeHttpRequest({ method, route, status, durationSeconds }) {
-  const labels = { method, route, status: String(status) };
+  const labels = {
+    method,
+    route: typeof route === 'string' && route.length > 0 ? route : UNKNOWN_ROUTE,
+    status: String(status),
+  };
   httpRequestsTotal.inc(labels);
   httpRequestDurationSeconds.observe(labels, durationSeconds);
 }
@@ -67,6 +93,8 @@ module.exports = {
   webhookDeliveriesTotal,
   webhookDeliveryDurationSeconds,
   webhookDlqSize,
+  UNKNOWN_ROUTE,
+  normalizeRoute,
   observeHttpRequest,
   observeWebhookDelivery,
   setWebhookDlqSize,

@@ -112,6 +112,16 @@ const shouldFallbackToLocalRegistry = (error) => {
   );
 };
 
+// #54 — Truncate an API key for safe inclusion in log metadata.
+// Never log a raw key: even a partial plaintext key is a security risk when
+// logs are shipped to a third-party aggregator.  This helper returns the
+// first 8 characters followed by "..." so the entry is useful for correlation
+// without exposing the full secret.  null/undefined input returns '[MISSING]'.
+function truncateKey(key) {
+  if (key == null || typeof key !== 'string') return '[MISSING]';
+  return key.substring(0, 8) + '...';
+}
+
 module.exports = {
   normalizeNameTag,
   maskIp,
@@ -125,4 +135,5 @@ module.exports = {
   exponentialDelay,
   DEFAULT_RETRY_FACTOR,
   DEFAULT_RETRY_JITTER,
+  truncateKey,
 };

@@ -59,6 +59,22 @@ async function delFederationCacheEntry(redisClient, username) {
   }
 }
 
+/**
+ * Invalidate a single cache entry by key.
+ * @param {object} redisClient - Redis client instance
+ * @param {string} key - Cache key to invalidate
+ */
+async function invalidate(redisClient, key) {
+  if (!redisClient || !redisClient.isReady) return;
+  if (!key) return;
+
+  try {
+    await redisClient.del(key);
+  } catch (err) {
+    logger.error('Error invalidating federation cache entry:', err);
+  }
+}
+
 module.exports = {
   FEDERATION_CACHE_TTL,
   FEDERATION_CACHE_PREFIX,
@@ -66,4 +82,5 @@ module.exports = {
   getCachedFederationResult,
   invalidateFederationCache,
   delFederationCacheEntry,
+  invalidate,
 };

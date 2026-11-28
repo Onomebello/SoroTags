@@ -60,6 +60,7 @@ function Dashboard({
   const [isNavOpen, setIsNavOpen] = useNavState();
   const {
     menuRef,
+    triggerRef: walletMenuTriggerRef,
     isOpen: isWalletMenuOpen,
     setIsOpen: setIsWalletMenuOpen,
   } = useWalletMenu();
@@ -284,6 +285,10 @@ function Dashboard({
   }, [debouncedNameTag, userPublicKey]);
 
   const handleConnect = async () => {
+    // Close the menu and park focus on its trigger first, so the wallet
+    // dialog returns focus there when it closes.
+    setIsWalletMenuOpen(false);
+    walletMenuTriggerRef.current?.focus();
     const result = await onConnectWallet();
     if (!result.ok) {
       displayMessage(
@@ -377,6 +382,24 @@ function Dashboard({
     }
   };
 
+  /**
+   * Native form submission, so Enter in either field sends the payment.
+   * @param {import('react').FormEvent<HTMLFormElement>} event
+   */
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    if (isSubmitting || isProcessing) return;
+    if (!canSubmitPayment) {
+      displayMessage(
+        "Enter a recipient and an amount greater than zero.",
+        "#DC2626",
+        "#FEE2E2",
+      );
+      return;
+    }
+    handleLookup();
+  };
+
   return (
     <div className="dashboard">
       <MobileNav
@@ -394,13 +417,16 @@ function Dashboard({
         <div className="wallet-menu" ref={menuRef}>
           <button
             type="button"
+            ref={walletMenuTriggerRef}
             className="wallet-menu-trigger"
+            aria-expanded={isWalletMenuOpen}
+            aria-controls="wallet-menu-dropdown"
             onClick={() => setIsWalletMenuOpen(!isWalletMenuOpen)}
           >
             {isWalletConnected ? shortWalletAddress : "Connect Wallet"}
           </button>
           {isWalletMenuOpen && (
-            <div className="wallet-menu-dropdown">
+            <div id="wallet-menu-dropdown" className="wallet-menu-dropdown">
               {isWalletConnected ? (
                 <button type="button" onClick={onDisconnectWallet}>
                   Disconnect
@@ -420,13 +446,21 @@ function Dashboard({
           <span className="balance-label">Balance</span>
           <button
             type="button"
+            aria-label={showBalance ? "Hide balance" : "Show balance"}
             onClick={() => setShowBalance((prev) => !prev)}
           >
             {showBalance ? "Hide" : "Show"}
           </button>
         </div>
         <div className="balance-value">
-          {showBalance ? formattedBalance : "••••••"}
+          {showBalance ? (
+            formattedBalance
+          ) : (
+            <>
+              <span aria-hidden="true">••••••</span>
+              <span className="sr-only">Balance hidden</span>
+            </>
+          )}
         </div>
         {balanceError && <p className="balance-error">{balanceError}</p>}
         <button
@@ -438,7 +472,15 @@ function Dashboard({
         </button>
       </section>
 
-      <section className="payment-form">
+      {/* Tab order follows DOM order (recipient, amount, send); positive
+          tabIndex values are avoided because they override the natural order
+          and are reported by axe. */}
+      <form
+        className="payment-form"
+        aria-label="Send payment"
+        onSubmit={handleSubmit}
+        noValidate
+      >
         <label htmlFor="recipient">Recipient</label>
         <input
           id="recipient"
@@ -469,23 +511,28 @@ function Dashboard({
           inputMode="decimal"
         />
 
+        {/* aria-disabled instead of disabled keeps the button in the Tab
+            order; handleSubmit refuses incomplete input with a message. */}
         <button
-          type="button"
-          onClick={handleLookup}
-          disabled={!canSubmitPayment}
+          type="submit"
+          aria-disabled={!canSubmitPayment}
         >
           {isProcessing ? "Processing..." : "Send Payment"}
         </button>
 
-        {status.text && (
-          <p
-            className="status-message"
-            style={{ color: status.color, backgroundColor: status.bgColor }}
-          >
-            {status.text}
-          </p>
-        )}
-      </section>
+        {/* The live region is always mounted so screen readers announce the
+            result when the message inside it changes. */}
+        <div role="status" aria-live="polite" aria-atomic="true">
+          {status.text && (
+            <p
+              className="status-message"
+              style={{ color: status.color, backgroundColor: status.bgColor }}
+            >
+              {status.text}
+            </p>
+          )}
+        </div>
+      </form>
 
       <section className="receive-panel">
         <h2>Receive</h2>

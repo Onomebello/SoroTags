@@ -17,6 +17,7 @@ const {
   buildFederationCacheKey,
   getCachedFederationResult,
   invalidateFederationCache,
+  invalidate,
   FEDERATION_CACHE_PREFIX,
   FEDERATION_CACHE_TTL,
 } = require('../src/federationCache');
@@ -140,6 +141,29 @@ describe('invalidateFederationCache', () => {
 describe('constants', () => {
   it('exposes the cache prefix', () => {
     expect(FEDERATION_CACHE_PREFIX).toBe('federation');
+  });
+});
+
+describe('invalidate', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('deletes a single cache entry by key when the client is ready', async () => {
+    const redis = { isReady: true, del: jest.fn().mockResolvedValue(1) };
+    await invalidate(redis, 'federation:name:alice');
+    expect(redis.del).toHaveBeenCalledWith('federation:name:alice');
+  });
+
+  it('is a no-op when the client is not ready', async () => {
+    await invalidate({ isReady: false, del: jest.fn() }, 'federation:name:alice');
+    await invalidate(null, 'federation:name:alice');
+  });
+
+  it('is a no-op when key is missing', async () => {
+    const redis = { isReady: true, del: jest.fn() };
+    await invalidate(redis);
+    expect(redis.del).not.toHaveBeenCalled();
   });
 });
 describe('federation cache invalidation on deregistration (src/cache.js)', () => {

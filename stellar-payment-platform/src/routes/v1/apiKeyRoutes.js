@@ -6,6 +6,7 @@ const { requireJson } = require('../../middleware/requireJson');
 const { createApiKeyBodySchema, revokeApiKeyBodySchema, rotateApiKeyBodySchema } = require('../../schemas');
 const { asyncHandler } = require('../../middleware/asyncHandler');
 const { requireAuth } = require('../../utils/jwt');
+const { truncateKey } = require('../../utils');
 
 module.exports = (redisClient) => {
   const router = express.Router();
@@ -51,14 +52,17 @@ module.exports = (redisClient) => {
     const record = await prisma.apiKey.findUnique({ where: { keyHash } });
 
     if (!record || !safeCompareHash(keyHash, record.keyHash)) {
+      logger.warn({ apiKey: truncateKey(token) }, 'API key authentication failed: invalid key');
       return next(new ApiError('UNAUTHENTICATED', 'Invalid API key'));
     }
 
     if (record.revokedAt) {
+      logger.warn({ apiKey: truncateKey(token) }, 'API key authentication failed: key revoked');
       return next(new ApiError('UNAUTHENTICATED', 'API key has been revoked'));
     }
 
     if (record.expiresAt && record.expiresAt < new Date()) {
+      logger.warn({ apiKey: truncateKey(token) }, 'API key authentication failed: key expired');
       return next(new ApiError('UNAUTHENTICATED', 'API key has expired'));
     }
 

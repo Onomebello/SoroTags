@@ -45,6 +45,8 @@ function buildDatasourceUrl(baseUrl = process.env.DATABASE_URL, env = process.en
 
 const datasourceUrl = buildDatasourceUrl();
 
+// Singleton guard: reuse an existing client if one was already created in this
+// process (e.g. after Jest clears the module cache between test files).
 const prisma =
   globalForPrisma.__prisma ||
   new PrismaClient({
@@ -52,7 +54,9 @@ const prisma =
     log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
   });
 
-if (process.env.NODE_ENV !== 'production') {
+// Always cache the instance on the global object so repeated require() calls
+// (including in test environments) return the same client.
+if (!globalForPrisma.__prisma) {
   globalForPrisma.__prisma = prisma;
 }
 

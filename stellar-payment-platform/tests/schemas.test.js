@@ -28,16 +28,28 @@ describe('request schemas', () => {
       expect(registerBodySchema.safeParse(valid).success).toBe(true);
     });
 
+    test.each(['admin', 'root', 'support', 'api', 'Admin'])(
+      'rejects reserved username %s',
+      (username) => {
+        expect(registerBodySchema.safeParse({ ...valid, username }).success).toBe(false);
+      },
+    );
+
     test.each([3, 20])('accepts a %i character username', (length) => {
       expect(registerBodySchema.safeParse({ ...valid, username: 'a'.repeat(length) }).success).toBe(true);
+    });
+
+    test('accepts a hyphenated username', () => {
+      expect(registerBodySchema.safeParse({ ...valid, username: 'alice-bob' }).success).toBe(true);
     });
 
     test.each([
       ['missing username', { username: undefined }, 'username: username is required'],
       ['2 character username', { username: 'ab' }, 'username: username must be between 3 and 20 characters'],
       ['21 character username', { username: 'a'.repeat(21) }, 'username: username must be between 3 and 20 characters'],
-      ['punctuation', { username: 'alice!@#' }, 'username: username must contain only letters and numbers'],
-      ['a federation tag', { username: 'ab*domain.com' }, 'username: username must contain only letters and numbers'],
+      ['punctuation', { username: 'alice!@#' }, 'username: username must contain only letters, numbers, and hyphens'],
+      ['a federation tag', { username: 'ab*domain.com' }, 'username: username must contain only letters, numbers, and hyphens'],
+      ['an xss payload', { username: 'alice<script>' }, 'username: username must contain only letters, numbers, and hyphens'],
       ['a non-string username', { username: 42 }, 'username: username is required'],
     ])('rejects %s', (_label, patch, expected) => {
       const messages = messagesFor(registerBodySchema, { ...valid, ...patch });
@@ -113,6 +125,19 @@ describe('request schemas', () => {
     test('accepts a well-formed federation address', () => {
       expect(federationQuerySchema.safeParse({ q: 'alice*localhost' }).success).toBe(true);
       expect(federationQuerySchema.safeParse({ q: 'alice*localhost', type: 'name' }).success).toBe(true);
+    });
+
+    test('accepts a bare username for type=name lookups', () => {
+      expect(federationQuerySchema.safeParse({ q: 'alice', type: 'name' }).success).toBe(true);
+    });
+
+    test('accepts an address query for type=id', () => {
+      expect(
+        federationQuerySchema.safeParse({
+          q: 'GABC123456789012345678901234567890123456789012345678',
+          type: 'id',
+        }).success,
+      ).toBe(true);
     });
 
     test.each([
@@ -331,4 +356,3 @@ describe('request schemas', () => {
     });
   });
 });
-

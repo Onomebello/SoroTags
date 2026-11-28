@@ -3,7 +3,7 @@
 const DEFAULT_LIMIT = 10 * 1024; // 10 KB
 
 // Endpoints that stream large payloads and must be exempt from the JSON body cap.
-const STREAMING_PATHS = ['/api/export', '/api/stream'];
+const STREAMING_PATHS = ['/api/export', '/api/stream', '/transactions/export'];
 
 function isStreamingPath(pathname) {
   return STREAMING_PATHS.some(
@@ -38,6 +38,14 @@ function bodyLimit(options = {}) {
       return res.end(
         JSON.stringify({ error: 'PAYLOAD_TOO_LARGE', code: 'PAYLOAD_TOO_LARGE', limit })
       );
+    }
+
+    const transferEncoding = String(req.headers['transfer-encoding'] || '').toLowerCase();
+    const isChunked = transferEncoding.includes('chunked');
+
+    // Non-chunked requests with a declared length are already bounded above.
+    if (!isChunked) {
+      return next();
     }
 
     let received = 0;

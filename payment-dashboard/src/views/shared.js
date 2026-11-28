@@ -170,6 +170,7 @@ export const useNavState = () => {
 /**
  * @typedef {{
  *   menuRef: import('react').RefObject<HTMLDivElement | null>,
+ *   triggerRef: import('react').RefObject<HTMLButtonElement | null>,
  *   isOpen: boolean,
  *   setIsOpen: import('react').Dispatch<import('react').SetStateAction<boolean>>
  * }} WalletMenuState
@@ -180,6 +181,7 @@ export const useNavState = () => {
  */
 export const useWalletMenu = () => {
   const menuRef = useRef(/** @type {HTMLDivElement | null} */ (null));
+  const triggerRef = useRef(/** @type {HTMLButtonElement | null} */ (null));
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
@@ -198,7 +200,24 @@ export const useWalletMenu = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  return { menuRef, isOpen, setIsOpen };
+  // Escape closes the open menu and hands focus back to its trigger so
+  // keyboard users are not left on a button that has just been removed.
+  useEffect(() => {
+    if (!isOpen) return;
+
+    /** @param {KeyboardEvent} event */
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
+  return { menuRef, triggerRef, isOpen, setIsOpen };
 };
 
 // Initialize the multi-wallet kit with strictly V1 syntax

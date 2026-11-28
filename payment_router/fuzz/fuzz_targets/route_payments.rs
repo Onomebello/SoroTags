@@ -7,7 +7,7 @@
 //! (return an `Err`) on invalid input rather than panic or trap — libFuzzer
 //! treats any panic as a crash, so a clean `Result` either way is a pass.
 //!
-//! Amount handling (issue #45): the contract rejects non-positive amounts with
+//! Amount handling (issue #44): the contract rejects non-positive amounts with
 //! `Error::InvalidAmount` before any arithmetic runs. libFuzzer's `i128`
 //! generator produces negative values freely, so this target asserts that
 //! negative amounts are rejected with `InvalidAmount` instead of being fed

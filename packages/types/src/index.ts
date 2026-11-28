@@ -83,7 +83,11 @@ export const Errors = {
   /**
    * Payment amount is below the admin-configured minimum transfer amount.
    */
-  10: {message:"AmountBelowMinimum"}
+  10: {message:"AmountBelowMinimum"},
+  /**
+   * Payment amount is zero or negative; `route_payment` requires amount >= 1.
+   */
+  16: {message:"InvalidAmount"}
 }
 
 export type DataKey = {tag: "Admin", values: void} | {tag: "PlatformTreasury", values: void} | {tag: "FeeBps", values: void} | {tag: "FeeCap", values: void} | {tag: "Paused", values: void} | {tag: "MaxAmount", values: void} | {tag: "MinAmount", values: void} | {tag: "UserVolume", values: readonly [string]} | {tag: "UserSpending", values: readonly [string]} | {tag: "Blacklist", values: readonly [string]};

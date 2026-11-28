@@ -65,7 +65,16 @@ describe('GET /federation', () => {
     const response = await request(app).get('/federation?q=unknown*localhost');
     
     expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('NOT_FOUND');
     expect(response.body.error.message).toBe('Name tag not found');
+  });
+
+  test('returns 400 INVALID_INPUT for an empty q parameter', async () => {
+    const response = await request(app).get('/federation?q=');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('INVALID_INPUT');
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
   });
 
   test('successfully looks up address when type=id', async () => {

@@ -64,6 +64,39 @@ jobs:
           MEMORY_TEST_REQUESTS: '200'
           MEMORY_LEAK_THRESHOLD_MB: '50'
 
+  # Pinned Postgres version guard (#17).
+  # docker-compose.yml must reference an exact Postgres minor version
+  # (e.g. postgres:16.3) for both the `dev` and `test` profiles so that
+  # contributors do not drift across patch releases. When upgrading Postgres,
+  # update the pin in docker-compose.yml AND the EXPECTED_PG_TAG below.
+  postgres-pin-check:
+    name: Verify Pinned Postgres Version (#17)
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_PG_TAG: 'postgres:16.3'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Ensure docker-compose.yml pins Postgres to ${{ env.EXPECTED_PG_TAG }}
+        run: |
+          set -euo pipefail
+          if [ ! -f docker-compose.yml ]; then
+            echo "::error::docker-compose.yml not found"
+            exit 1
+          fi
+          # Every postgres image reference must use the exact pinned tag.
+          if grep -nE 'image:\s*postgres:' docker-compose.yml | grep -vE "image:\s*${EXPECTED_PG_TAG}\s*$"; then
+            echo "::error::docker-compose.yml contains a postgres image that is not pinned to ${EXPECTED_PG_TAG}"
+            exit 1
+          fi
+          # At least one pinned reference must exist (dev + test profiles).
+          if ! grep -qE "image:\s*${EXPECTED_PG_TAG}\s*$" docker-compose.yml; then
+            echo "::error::docker-compose.yml does not reference ${EXPECTED_PG_TAG}"
+            exit 1
+          fi
+          echo "Postgres image is pinned to ${EXPECTED_PG_TAG}"
+
   openapi-spec-check:
     name: Validate OpenAPI Spec (#253)
     runs-on: ubuntu-latest

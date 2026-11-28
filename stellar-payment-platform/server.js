@@ -43,6 +43,7 @@ const { apiVersion } = require("./src/middleware/apiVersion");
 const { deprecationMiddleware } = require("./src/middleware/deprecation");
 const {
   registerBodySchema,
+  isReservedUsername,
   federationQuerySchema,
   lookupQuerySchema,
   usersQuerySchema,
@@ -70,7 +71,6 @@ const {
 const {
   normalizeNameTag,
   validateMemo,
-  RESERVED_NAMES,
   MAX_USERNAMES_PER_ADDRESS,
   PRIMARY_USERNAME_ORDER,
   USER_DATABASE,
@@ -163,12 +163,17 @@ const corsOptions = {
     return callback(new Error("Not allowed by CORS"));
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID", "X-Api-Key"],
   credentials: true,
-  optionsSuccessStatus: 204,
+  // Browser preflights must get 200 OK; some clients treat 204 as a failure.
+  optionsSuccessStatus: 200,
 };
 
 app.use(cors(corsOptions));
+
+// Explicitly answer every OPTIONS preflight here, before any router or
+// app.all() method-not-allowed handler (e.g. under /admin/*) can return 405.
+app.options("*", cors(corsOptions));
 
 // Apply metrics middleware to track all HTTP requests
 app.use(metricsMiddleware);
@@ -236,9 +241,16 @@ const getRequestApiKey = (req) => {
 const validateApiKey = async (apiKey) => {
   if (!apiKey) return null;
   try {
-    const { validateApiKey: validate } = require("./src/services/apiKeyService");
-    const record = await validate(apiKey);
-    return record || null;
+    const keyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+    const record = await prisma.apiKey.findUnique({ where: { keyHash } });
+    if (
+      !record ||
+      record.revokedAt ||
+      (record.expiresAt && record.expiresAt <= new Date())
+    ) {
+      return null;
+    }
+    return record;
   } catch (err) {
     // Any failure to validate (store down, malformed key, etc.) must degrade
     // to the anonymous tier rather than granting the higher limit.
@@ -285,7 +297,7 @@ const limiter = rateLimit({
   keyGenerator: (req /*, res */) => {
     try {
       if (req.apiKeyRecord) {
-        return `auth:${req.apiKeyRecord.id || getRequestApiKey(req)}`;
+        return `auth:${req.apiKeyRecord.keyHash}`;
       }
       return `anon:${req.ip || (req.connection && req.connection.remoteAddress) || ""}`;
     } catch (err) {
@@ -372,16 +384,6 @@ app.use(compression({ threshold: 1024 }));
 scheduleCleanupJob(prisma);
 scheduleSoftDeletePurgeJob(prisma);
 const poolMonitor = schedulePoolMonitoring(prisma);
-
-const RESERVED_USERNAMES = [
-  "admin",
-  "root",
-  "stellar",
-  "system",
-  "superuser",
-  "administrator",
-  "support",
-];
 
 // ---------------------------------------------------------------------------
 // #51 — ETag Caching Middleware for Federation Endpoint
@@ -517,6 +519,27 @@ const registerLocalUser = async ({ username, address, isPrimary = false }) => {
   }
 };
 
+/**
+ * @openapi
+ * /version:
+ *   get:
+ *     tags:
+ *       - v1
+ *     summary: Report the running deployment version
+ *     responses:
+ *       200:
+ *         description: Deployment metadata
+ */
+app.get("/version", (_req, res) => {
+  const packageJson = require("./package.json");
+  res.json({
+    version: packageJson.version,
+    commitSha: process.env.COMMIT_SHA || "unknown",
+    contractId: process.env.CONTRACT_ID || "unknown",
+    nodeEnv: process.env.NODE_ENV || "development",
+  });
+});
+
 // Expose /metrics endpoint for Prometheus to scrape
 
 /**
@@ -626,9 +649,7 @@ app.get(
         });
 
         if (!cached) {
-          const notFoundError = new Error("Address not found");
-          notFoundError.statusCode = 404;
-          return next(notFoundError);
+          return next(new ApiError("NOT_FOUND", "Address not found"));
         }
 
         return res.json(cached);
@@ -682,9 +703,7 @@ app.get(
         });
 
         if (!cached) {
-          const notFoundError = new Error("Name tag not found");
-          notFoundError.statusCode = 404;
-          return next(notFoundError);
+          return next(new ApiError("NOT_FOUND", "Name tag not found"));
         }
 
         return res.json(cached);
@@ -804,6 +823,12 @@ app.post(
   ipLimiter,
   idempotencyMiddleware(redisClient),
   requireJson,
+  (req, _res, next) => {
+    if (isReservedUsername(req.body?.username)) {
+      return next(new ApiError("FORBIDDEN", "This username is reserved."));
+    }
+    return next();
+  },
   validateSchema({ body: registerBodySchema }),
   async (req, res, next) => {
     // registerBodySchema has already guaranteed that username is a trimmed
@@ -841,9 +866,7 @@ app.post(
     }
 
     if (!StrKey.isValidEd25519PublicKey(address)) {
-      const error = new Error("Invalid Stellar Public Key format.");
-      error.statusCode = 400;
-      return next(error);
+      return next(new ApiError("INVALID_INPUT", "Invalid Stellar address"));
     }
 
     const memoError = validateMemo(memoType, memo);
@@ -852,31 +875,6 @@ app.post(
     }
 
     const normalizedUsername = username.toLowerCase();
-
-    const normalizedLocalPart = normalizedUsername.includes("*")
-      ? normalizedUsername.split("*")[0]
-      : normalizedUsername;
-    if (RESERVED_USERNAMES.includes(normalizedLocalPart)) {
-      return res.status(403).json({ error: "Username is reserved." });
-    }
-
-    const RESERVED_NAMES = [
-      "admin",
-      "root",
-      "support",
-      "system",
-      "stellar",
-      "api",
-      "help",
-    ];
-    if (RESERVED_NAMES.includes(normalizedUsername)) {
-      return next(
-        new ApiError(
-          "FORBIDDEN",
-          "This username is reserved and cannot be registered.",
-        ),
-      );
-    }
 
     try {
       // #613 — an address may carry several usernames (aliases). Registration

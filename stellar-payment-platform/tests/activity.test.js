@@ -5,6 +5,7 @@ jest.mock('../src/logger', () => ({ logger: require('pino')({ level: 'silent' })
 const {
   ACTIVITY_ACTIONS,
   recordActivity,
+  logMany,
   listActivity,
   parseDateRange,
   serializeActivity,
@@ -16,6 +17,7 @@ const {
 const mockPrisma = () => ({
   activityLog: {
     create: jest.fn().mockResolvedValue({ id: 'row-1' }),
+    createMany: jest.fn().mockResolvedValue({ count: 2 }),
     count: jest.fn().mockResolvedValue(0),
     findMany: jest.fn().mockResolvedValue([]),
   },
@@ -56,6 +58,36 @@ describe('recordActivity', () => {
     await recordActivity(prisma, { username: 'ada*localhost', action: '' });
 
     expect(prisma.activityLog.create).not.toHaveBeenCalled();
+  });
+
+  test('logMany inserts every event with a single createMany call', async () => {
+    const prisma = mockPrisma();
+    const result = await logMany(prisma, [
+      { username: 'ada', action: ACTIVITY_ACTIONS.USER_BLOCKED, metadata: { address: 'G1' } },
+      { username: 'bob', action: ACTIVITY_ACTIONS.USER_BLOCKED, metadata: { address: 'G1' } },
+      { username: 'carol', action: ACTIVITY_ACTIONS.USER_BLOCKED, metadata: { address: 'G1' } },
+    ]);
+
+    expect(prisma.activityLog.createMany).toHaveBeenCalledTimes(1);
+    expect(prisma.activityLog.create).not.toHaveBeenCalled();
+    const call = prisma.activityLog.createMany.mock.calls[0][0];
+    expect(call.data).toHaveLength(3);
+    expect(call.skipDuplicates).toBe(false);
+    expect(result).toEqual({ count: 2 });
+  });
+
+  test('logMany is a no-op for an empty list', async () => {
+    const prisma = mockPrisma();
+    await logMany(prisma, []);
+    expect(prisma.activityLog.createMany).not.toHaveBeenCalled();
+  });
+
+  test('logMany swallows a createMany failure', async () => {
+    const prisma = mockPrisma();
+    prisma.activityLog.createMany.mockRejectedValue(new Error('database is down'));
+    await expect(
+      logMany(prisma, [{ username: 'ada', action: 'user.registered' }]),
+    ).resolves.toEqual({ count: 0 });
   });
 
   test('replaces metadata that would bloat the row', async () => {

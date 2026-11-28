@@ -18,12 +18,10 @@ describe('createRedisConnection', () => {
     delete process.env.REDIS_URL;
   });
 
-  it('connects to the default Redis URL when REDIS_URL is unset', () => {
+  it('returns null when REDIS_URL is unset', () => {
     const client = createRedisConnection();
-    expect(IORedis).toHaveBeenCalledWith(DEFAULT_REDIS_URL, {
-      maxRetriesPerRequest: null,
-    });
-    expect(client.url).toBe(DEFAULT_REDIS_URL);
+    expect(client).toBeNull();
+    expect(IORedis).not.toHaveBeenCalled();
   });
 
   it('uses REDIS_URL when set', () => {
@@ -35,7 +33,8 @@ describe('createRedisConnection', () => {
     expect(client.url).toBe('redis://redis.example:6380');
   });
 
-  it('always configures blocking-command safe retries', () => {
+  it('configures blocking-command safe retries when REDIS_URL is set', () => {
+    process.env.REDIS_URL = 'redis://redis.example:6380';
     createRedisConnection();
     const [, options] = IORedis.mock.calls[0];
     expect(options.maxRetriesPerRequest).toBeNull();

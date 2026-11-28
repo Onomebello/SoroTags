@@ -1,7 +1,7 @@
 const redis = require('../config/redis');
 
 const CACHE_PREFIX = 'stats:';
-const DEFAULT_TTL_SECONDS = 60;
+const DEFAULT_TTL_SECONDS = 300; // 5 minutes
 
 /**
  * Statistics cache backed by Redis so that cached stats are shared across

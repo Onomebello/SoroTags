@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const request = require('supertest');
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -51,6 +52,9 @@ jest.mock('../prismaClient', () => ({
 
 jest.mock('../src/cleanup-cron', () => ({ scheduleCleanupJob: jest.fn() }));
 jest.mock('../src/soft-delete-purge-cron', () => ({ scheduleSoftDeletePurgeJob: jest.fn() }));
+jest.mock('../src/middleware/deprecation', () => ({
+  deprecationMiddleware: () => (req, res, next) => next(),
+}));
 
 jest.mock('../src/multisigner-verifier', () => ({
   verifyMultiSignerThreshold: jest.fn().mockResolvedValue({
@@ -105,6 +109,13 @@ describe('Rate Limiting — express-rate-limit', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    const { prisma } = require('../prismaClient');
+    prisma.user.findFirst.mockResolvedValue({
+      address: VALID_ADDRESS,
+      memoType: null,
+      memo: null,
+      flaggedAt: null,
+    });
     ({ app } = require('../server'));
   });
 
@@ -283,20 +294,16 @@ describe('Rate Limiting — express-rate-limit', () => {
     // The API key validator is mocked so that only VALID_API_KEY is accepted.
     beforeEach(() => {
       const { prisma } = require('../prismaClient');
+      const validKeyHash = crypto
+        .createHash('sha256')
+        .update(VALID_API_KEY)
+        .digest('hex');
+      const validApiKeys = new Map([
+        [validKeyHash, { id: 'key-1', keyHash: validKeyHash, revokedAt: null, expiresAt: null }],
+      ]);
       prisma.apiKey = {
         findUnique: jest.fn(({ where }) =>
-          Promise.resolve(
-            where && where.key === VALID_API_KEY
-              ? { id: 'key-1', key: VALID_API_KEY, revoked: false }
-              : null,
-          ),
-        ),
-        findFirst: jest.fn(({ where }) =>
-          Promise.resolve(
-            where && where.key === VALID_API_KEY
-              ? { id: 'key-1', key: VALID_API_KEY, revoked: false }
-              : null,
-          ),
+          Promise.resolve(validApiKeys.get(where?.keyHash) || null),
         ),
       };
     });
@@ -318,6 +325,11 @@ describe('Rate Limiting — express-rate-limit', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['ratelimit-limit']).toBe(String(AUTHENTICATED_LIMIT));
+      expect(require('../prismaClient').prisma.apiKey.findUnique).toHaveBeenCalledWith({
+        where: {
+          keyHash: crypto.createHash('sha256').update(VALID_API_KEY).digest('hex'),
+        },
+      });
     });
 
     it('falls back to the anonymous limit for an invalid API key', async () => {

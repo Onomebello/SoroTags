@@ -1,0 +1,53 @@
+name: Bindings Freshness Check
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  bindings-check:
+    name: Verify packages/types Bindings (#20)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            payment_router/target
+          key: ${{ runner.os }}-cargo-bindings-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bindings-
+
+      - name: Build Contract WASM (payment_router)
+        run: cargo build --release --target wasm32-unknown-unknown --manifest-path payment_router/Cargo.toml
+
+      - name: Install Root Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Regenerate TypeScript Bindings
+        run: npm run generate:bindings
+
+      - name: Fail if packages/types drifted from the contract ABI
+        run: |
+          if ! git diff --exit-code packages/types; then
+            echo "::error::packages/types bindings are stale. Run 'npm run generate:bindings' and commit the result."
+            exit 1
+          fi
+          echo "packages/types bindings are up to date."

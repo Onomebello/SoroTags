@@ -73,6 +73,44 @@ const recordActivity = async (prisma, { username, action, metadata = null, req =
 };
 
 /**
+ * Writes many activity rows in a single Prisma `createMany` call.
+ *
+ * Operations that produce several events at once (e.g. blocking an address
+ * that owns multiple usernames, bulk imports) would otherwise issue N
+ * sequential `create` round-trips. This batches them into one statement.
+ *
+ * Like {@link recordActivity}, a logging failure never propagates to the
+ * caller: the trail is a record of the request, not part of it.
+ *
+ * @param {object} prisma - Prisma client instance.
+ * @param {Array<{username: string, action: string, metadata?: object, req?: object}>} events
+ * @returns {Promise<{count: number}>} the createMany result (or a zero count on failure).
+ */
+const logMany = async (prisma, events = []) => {
+  if (!Array.isArray(events) || events.length === 0) {
+    return { count: 0 };
+  }
+
+  const data = events
+    .filter((event) => event && event.username && event.action)
+    .map((event) => ({
+      username: event.username,
+      action: event.action,
+      metadata: boundMetadata(event.metadata ?? null),
+      ipAddress: event.req ? clientIp(event.req) : null,
+    }));
+
+  if (data.length === 0) return { count: 0 };
+
+  try {
+    return await prisma.activityLog.createMany({ data, skipDuplicates: false });
+  } catch (err) {
+    logger.error(err, `[activity] Failed to record ${data.length} activity events`);
+    return { count: 0 };
+  }
+};
+
+/**
  * Parses the optional `startDate` / `endDate` query params.
  * @returns {{ range: object|null, error: string|null }}
  */
@@ -133,6 +171,7 @@ const serializeActivity = (row) => ({
 module.exports = {
   ACTIVITY_ACTIONS,
   recordActivity,
+  logMany,
   listActivity,
   parseDateRange,
   serializeActivity,

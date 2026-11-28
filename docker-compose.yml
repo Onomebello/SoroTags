@@ -19,6 +19,11 @@
 # every developer and CI run gets byte-identical images. Bumping a pin is done
 # through a Dependabot/Renovate PR, which keeps the change reviewable and
 # reproducible. Do not replace these with floating tags.
+#
+# Postgres pin: both the dev (`postgres`) and test (`postgres-test`) services
+# use the SAME pinned tag (currently 16.9-alpine). When upgrading Postgres,
+# update BOTH services together and note the new version in the README under
+# "Database setup" so schema/extension behavior stays consistent everywhere.
 services:
   # ── dev ────────────────────────────────────────────────────────────────────
   postgres:

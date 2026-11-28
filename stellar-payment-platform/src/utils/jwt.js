@@ -157,12 +157,16 @@ function requireAuth(req, res, next) {
     req.user = verifyToken(token);
     return next();
   } catch (err) {
-    if (err.message === 'UNAUTHENTICATED' || err.code === 'UNAUTHENTICATED') {
-      return res.status(401).json({ error: 'UNAUTHENTICATED' });
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        error: 'TOKEN_EXPIRED',
+        message: 'Your session has expired. Please log in again.',
+      });
     }
-    const message =
-      err.name === 'TokenExpiredError' ? 'Token has expired.' : 'Invalid token.';
-    return res.status(401).json({ error: message });
+    if (err.message === 'UNAUTHENTICATED' || err.code === 'UNAUTHENTICATED') {
+      return res.status(401).json({ error: 'TOKEN_INVALID', message: 'Invalid token.' });
+    }
+    return res.status(401).json({ error: 'TOKEN_INVALID', message: 'Invalid token.' });
   }
 }
 

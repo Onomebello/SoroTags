@@ -35,6 +35,8 @@ async function getRoutingStats({ startDate, endDate, groupBy = 'day' } = {}) {
   const { params, conditions } = buildDateRange(startDate, endDate);
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
+  // DATE_TRUNC('week', ...) in PostgreSQL already uses ISO week semantics
+  // (weeks start on Monday), so weekly buckets align across month boundaries.
   const query = `
     SELECT
       TO_CHAR(DATE_TRUNC('${trunc}', created_at), '${format}') AS bucket,

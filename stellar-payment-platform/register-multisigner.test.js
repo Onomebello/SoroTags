@@ -131,7 +131,7 @@ describe('POST /register - Multi-Signer Threshold Verification', () => {
         });
 
       expect(response.status).toBe(400);
-      expect(response.body.error.message).toContain('Invalid Stellar Public Key format');
+      expect(response.body.error.message).toContain('Invalid Stellar address');
     });
 
     it('should reject request with missing username', async () => {

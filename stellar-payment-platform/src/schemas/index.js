@@ -78,7 +78,7 @@ const registerBodySchema = z
       .trim()
       .min(3, 'username must be between 3 and 20 characters')
       .max(20, 'username must be between 3 and 20 characters')
-      .regex(/^[a-zA-Z0-9]+$/, 'username must contain only letters and numbers'),
+      .regex(/^[a-zA-Z0-9-]+$/, 'username must contain only letters, numbers, and hyphens'),
     // Only required to be a non-empty string: StrKey in the handler is the
     // authoritative format check and answers 400 with a Stellar-specific
     // message. Adding a length bound here would reject payloads before they

@@ -107,6 +107,28 @@ cargo test
 4. Ensure CI passes and all tests are green.
 5. Respond to review feedback promptly. A maintainer will review and merge once approved.
 
+## Security Practices
+
+This project implements the following security measures:
+
+### Input Validation
+
+- **Body schemas** use Zod with `.strip()` to remove unknown fields before passing data to handlers. This prevents mass-assignment attacks where attackers inject extra fields (e.g., `isAdmin: true`) into request bodies.
+- All user input is validated and sanitized before database operations.
+
+### CSV Export
+
+- Exported CSV files follow RFC 4180 standard:
+  - All fields are wrapped in double quotes
+  - Internal quotes are escaped by doubling (`""`)
+  - This ensures fields containing commas, newlines, or quotes don't corrupt the output
+
+### Secret Scanning
+
+- CI runs TruffleHog on every push and PR using the `secret-scan.yml` workflow.
+- The scanner is configured with `--fail` to block merges when secrets are detected.
+- Known test secrets can be added to `.github/trufflehog-ignore.txt` (must be invalidated/placeholder values).
+
 ## Questions?
 
 If anything here is unclear, open an issue or start a discussion — we're happy to help.

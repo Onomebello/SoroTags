@@ -9,6 +9,7 @@
     "prepare": "husky",
     "load:test": "artillery run artillery.yml",
     "generate:bindings": "bash scripts/generate-bindings.sh",
+    "prisma:deploy": "prisma migrate deploy",
     "test:unit": "npm --prefix stellar-payment-platform test -- --testPathPattern=tests/unit --passWithNoTests",
     "test:integration": "bash tests/integration/run.sh",
     "test:all": "npm test --workspace=payment-dashboard && npm test --workspace=stellar-payment-platform && cd payment_router && cargo test",

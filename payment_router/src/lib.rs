@@ -240,6 +240,9 @@ pub enum Error {
     ContractFrozen = 14,
     /// The payment amount is below the admin-configured minimum transfer amount.
     AmountBelowMinimum = 15,
+    /// The payment amount is zero or negative. Rejected before any other
+    /// processing so meaningless transfers never touch ledger state.
+    InvalidAmount = 16,
 }
 
 /// Soroban contract that routes token payments between addresses while
@@ -1261,11 +1264,14 @@ impl PaymentRouter {
     /// - `sender`: Address the funds are debited from; must authorize the call.
     /// - `recipient`: Address to receive the funds (minus the platform fee).
     /// - `token_address`: Contract ID of the token being transferred.
-    /// - `amount`: Amount to route, in the token's smallest unit. Must be
-    ///   positive and within the configured min/max and daily-limit bounds.
+    /// - `amount`: Amount to route, in the token's smallest unit (stroops for
+    ///   XLM). Must be at least 1 and within the configured min/max and
+    ///   daily-limit bounds.
     ///
     /// # Returns
-    /// `Ok(())` on success. Returns `Err(Error::Paused)` if routing is
+    /// `Ok(())` on success. Returns `Err(Error::InvalidAmount)` if `amount`
+    /// is zero or negative (checked first, before any other validation),
+    /// `Err(Error::Paused)` if routing is
     /// paused, `Err(Error::NotInitialized)` if the contract has no admin
     /// set, `Err(Error::InvalidRecipient)` if `sender == recipient`,
     /// `Err(Error::Blacklisted)` if `recipient` is blacklisted,
@@ -1284,6 +1290,11 @@ impl PaymentRouter {
         token_address: Address,
         amount: i128,
     ) -> Result<(), Error> {
+        // Reject zero/negative amounts up front: they waste ledger entries and
+        // enable fee-only spam. Minimum accepted value is 1 (one stroop).
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
         if Self::is_frozen_internal(&env) {
             return Err(Error::ContractFrozen);
         }
@@ -1556,6 +1567,77 @@ mod test {
         let token_client = token::Client::new(env, &token_address);
         let token_admin_client = token::StellarAssetClient::new(env, &token_address);
         (token_address, token_client, token_admin_client)
+    }
+
+    // ── Amount validation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_route_payment_rejects_zero_amount() {
+        let (env, client, _) = setup_env();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        client.initialize(&admin, &treasury, &100, &1000, &PaymentRouter::MAX_AMOUNT);
+
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let (token_addr, token_client, sac) = setup_token(&env);
+        sac.mint(&sender, &10_000);
+
+        let res = client.try_route_payment(&sender, &recipient, &token_addr, &0);
+        assert_eq!(res.unwrap_err().unwrap(), Error::InvalidAmount);
+
+        // No funds moved.
+        assert_eq!(token_client.balance(&sender), 10_000);
+        assert_eq!(token_client.balance(&recipient), 0);
+        assert_eq!(token_client.balance(&treasury), 0);
+    }
+
+    #[test]
+    fn test_route_payment_rejects_negative_amount() {
+        let (env, client, _) = setup_env();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        client.initialize(&admin, &treasury, &100, &1000, &PaymentRouter::MAX_AMOUNT);
+
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let (token_addr, token_client, sac) = setup_token(&env);
+        sac.mint(&sender, &10_000);
+
+        for amount in [-1i128, -1000, i128::MIN] {
+            let res = client.try_route_payment(&sender, &recipient, &token_addr, &amount);
+            assert_eq!(res.unwrap_err().unwrap(), Error::InvalidAmount);
+        }
+        assert_eq!(token_client.balance(&sender), 10_000);
+    }
+
+    #[test]
+    fn test_route_payment_rejects_zero_amount_before_init() {
+        // The amount check runs first, so even an uninitialized contract
+        // reports InvalidAmount rather than NotInitialized.
+        let (env, client, _) = setup_env();
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let (token_addr, _, _) = setup_token(&env);
+
+        let res = client.try_route_payment(&sender, &recipient, &token_addr, &0);
+        assert_eq!(res.unwrap_err().unwrap(), Error::InvalidAmount);
+    }
+
+    #[test]
+    fn test_route_payment_accepts_minimum_amount_of_one() {
+        let (env, client, _) = setup_env();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        client.initialize(&admin, &treasury, &100, &1000, &PaymentRouter::MAX_AMOUNT);
+
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let (token_addr, token_client, sac) = setup_token(&env);
+        sac.mint(&sender, &10_000);
+
+        assert!(client.try_route_payment(&sender, &recipient, &token_addr, &1).is_ok());
+        assert_eq!(token_client.balance(&sender), 9_999);
     }
 
     // ── Timelock tests ───────────────────────────────────────────────────────

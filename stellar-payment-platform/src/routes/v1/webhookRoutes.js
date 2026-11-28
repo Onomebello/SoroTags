@@ -9,6 +9,7 @@ const { shouldFallbackToLocalRegistry } = require('../../utils');
 const { idempotencyMiddleware } = require('../../../middleware/idempotency');
 const { authenticateUsernameOwner } = require('../../services/ownershipService');
 const { ACTIVITY_ACTIONS, recordActivity } = require('../../services/activityService');
+const { encryptSecret } = require('../../utils/webhookSecret');
 
 module.exports = (redisClient) => {
   const router = express.Router();
@@ -197,6 +198,9 @@ router.post('/webhooks', asyncHandler(async (req, res, next) => {
     }
 
     const secret = crypto.randomBytes(32).toString('hex');
+    // The plaintext secret is returned to the caller once; at rest it is stored
+    // encrypted (AES-256-GCM) so a database leak does not expose HMAC keys.
+    const storedSecret = encryptSecret(secret);
     const id = uuidv4();
     const now = new Date();
 
@@ -207,7 +211,7 @@ router.post('/webhooks', asyncHandler(async (req, res, next) => {
           id,
           username: user.username,
           url: rawUrl,
-          secret,
+          secret: storedSecret,
           events,
           createdAt: now,
         },
@@ -228,7 +232,7 @@ router.post('/webhooks', asyncHandler(async (req, res, next) => {
       await poolRun(
         `INSERT INTO webhooks (id, username, url, secret, events, created_at, last_sent_at, failing_since)
          VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL)`,
-        [id, user.username, rawUrl, secret, JSON.stringify(events), now.toISOString()],
+        [id, user.username, rawUrl, storedSecret, JSON.stringify(events), now.toISOString()],
       );
       webhook = { id, username: user.username, url: rawUrl, events, createdAt: now.toISOString() };
     }

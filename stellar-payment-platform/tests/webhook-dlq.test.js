@@ -12,6 +12,22 @@ jest.mock('../src/logger', () => ({
   },
 }));
 
+const mockWorkerOn = jest.fn();
+const mockWorkerClose = jest.fn().mockResolvedValue(undefined);
+jest.mock('bullmq', () => ({
+  Queue: jest.fn(),
+  Worker: jest.fn().mockImplementation(function MockWorker() {
+    this.on = mockWorkerOn;
+    this.close = mockWorkerClose;
+  }),
+}));
+
+jest.mock('../src/config/redis', () => ({
+  createRedisConnection: jest.fn(() => ({
+    quit: jest.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 jest.mock('../prismaClient', () => ({
   prisma: {},
 }));
@@ -22,16 +38,18 @@ const {
   moveToDLQ,
   listDLQEntries,
   replayFromDLQ,
+  startWebhookWorker,
+  closeWebhookQueue,
 } = webhookWorker;
 
 const { prisma } = require('../prismaClient');
+const { logger } = require('../src/logger');
 
 // Mock global.fetch for sendWebhook calls
 global.fetch = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
-  jest.resetAllMocks();
 
   // Reset fetch mock
   global.fetch.mockResolvedValue({
@@ -42,6 +60,12 @@ beforeEach(() => {
   // Reset prisma mock methods
   prisma.webhook = {
     findMany: jest.fn().mockResolvedValue([]),
+    findUnique: jest.fn().mockResolvedValue({ failingSince: null }),
+    update: jest.fn().mockResolvedValue({}),
+  };
+  prisma.webhookEvent = {
+    findFirst: jest.fn().mockResolvedValue(null),
+    create: jest.fn().mockResolvedValue({ id: 'event-1' }),
     update: jest.fn().mockResolvedValue({}),
   };
   prisma.webhookDLQ = {
@@ -109,6 +133,103 @@ describe('moveToDLQ', () => {
     expect(createData.username).toBe('alice');
     expect(createData.replayed).toBe(false);
     expect(createData.failureReason).toContain('exhausted');
+  });
+
+  it('emits a warn log with the webhook and event ids on DLQ transition (#109)', async () => {
+    const webhook = {
+      id: 'wh-1',
+  it('moves an event to the DLQ after the fifth failed attempt', async () => {
+    const webhook = {
+      id: 'wh-exhausted',
+      username: 'alice',
+      url: 'https://example.com/hook',
+      secret: 'secret-abc',
+      failingSince: new Date(),
+    };
+
+    await moveToDLQ(prisma, async () => {}, webhook, new Error('boom'));
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Webhook moved to DLQ',
+      expect.objectContaining({
+        webhookId: 'wh-1',
+        eventId: expect.stringContaining('dlq-wh-1-'),
+        lastError: 'boom',
+      }),
+    );
+  });
+
+  it('POSTs a notification when WEBHOOK_DLQ_NOTIFY_URL is configured (#109)', async () => {
+    process.env.WEBHOOK_DLQ_NOTIFY_URL = 'https://ops.example.com/dlq';
+    const webhook = {
+      id: 'wh-2',
+      username: 'bob',
+      url: 'https://example.com/hook2',
+      secret: 'secret-xyz',
+      failingSince: new Date(),
+    };
+
+    try {
+      await moveToDLQ(prisma, async () => {}, webhook, new Error('kaboom'));
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://ops.example.com/dlq',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
+        }),
+      );
+      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(body).toMatchObject({ event: 'webhook.dlq', webhookId: 'wh-2', lastError: 'kaboom' });
+    } finally {
+      delete process.env.WEBHOOK_DLQ_NOTIFY_URL;
+    }
+  });
+
+  it('does not POST a notification when WEBHOOK_DLQ_NOTIFY_URL is unset (#109)', async () => {
+    delete process.env.WEBHOOK_DLQ_NOTIFY_URL;
+    const webhook = {
+      id: 'wh-3',
+      username: 'carol',
+      url: 'https://example.com/hook3',
+      secret: 'secret-1',
+      failingSince: new Date(),
+    };
+
+    global.fetch.mockClear();
+    await moveToDLQ(prisma, async () => {}, webhook);
+    expect(global.fetch).not.toHaveBeenCalled();
+    const payload = {
+      event: 'payment.received',
+      event_id: 'payment-exhausted',
+      data: {},
+    };
+    prisma.webhookEvent.findFirst.mockResolvedValue({ id: 'event-1' });
+
+    startWebhookWorker({ prisma, poolRunFn: async () => {} });
+    const onFailed = mockWorkerOn.mock.calls.find(([event]) => event === 'failed')[1];
+    await onFailed(
+      {
+        id: 'job-exhausted',
+        attemptsMade: 5,
+        opts: { attempts: 5 },
+        data: { webhook, payload },
+      },
+      new Error('Webhook responded with HTTP 503'),
+    );
+
+    expect(prisma.webhookDLQ.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ webhookId: webhook.id, replayed: false }),
+    }));
+    expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
+      where: { id: 'event-1' },
+      data: {
+        status: 'dead_letter',
+        lastError: 'Webhook responded with HTTP 503',
+      },
+    });
+
+    await closeWebhookQueue();
   });
 });
 
@@ -237,11 +358,26 @@ describe('replayFromDLQ', () => {
       return updated;
     });
 
-    // 1. Trigger initial webhook delivery failure (HTTP 503)
+    // 1. Trigger an initial failure and persist its attempt details.
     global.fetch.mockResolvedValueOnce({ ok: false, status: 503 });
     await expect(
-      webhookWorker.sendWebhook(webhook.url, { event: 'payment.received' }, webhook.secret),
+      webhookWorker.processWebhookJob(
+        {
+          data: {
+            webhook,
+            payload: { event: 'payment.received', event_id: 'payment-event-1' },
+          },
+          attemptsMade: 0,
+        },
+        { prisma, poolRunFn: jest.fn() },
+      ),
     ).rejects.toThrow('Webhook responded with HTTP 503');
+    expect(prisma.webhookEvent.update).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      data: expect.objectContaining({ attemptCount: { increment: 1 } }),
+    }));
+    expect(prisma.webhookEvent.update).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      data: expect.objectContaining({ lastError: 'Webhook responded with HTTP 503' }),
+    }));
 
     // 2. Move exhausted webhook to DLQ and confirm DLQ entry exists
     await moveToDLQ(prisma, async () => {}, webhook);

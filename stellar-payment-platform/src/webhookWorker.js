@@ -1,8 +1,15 @@
 const crypto = require('crypto');
-const { Queue, Worker } = require('bullmq');
+const dns = require('dns');
+const net = require('net');
+const { Queue, Worker, UnrecoverableError } = require('bullmq');
 const { createRedisConnection } = require('./config/redis');
 const { logger } = require('./logger');
 const { shouldFallbackToLocalRegistry } = require('./utils');
+const { decryptSecret } = require('./utils/webhookSecret');
+const {
+  shouldFallbackToLocalRegistry,
+  exponentialDelay,
+} = require('./utils');
 const {
   updatePaymentIntentStatus,
   VALID_TRANSITIONS,
@@ -136,16 +143,107 @@ const getWebhooksExhaustedRetries = async (prisma, poolAllFn) => {
   }
 };
 
+// ── SSRF protection ─────────────────────────────────────────────────────────
+//
+// Webhook URLs are user-controlled and stored long before delivery, so every
+// delivery re-validates the target. Only HTTPS endpoints that resolve to
+// public unicast addresses are allowed.
+
+const SSRF_ERROR_CODE = 'SSRF_BLOCKED';
+
+// Non-public IPv4 ranges: [network, prefix length, label].
+const BLOCKED_IPV4_RANGES = [
+  ['0.0.0.0', 8, 'reserved'], //          "this" network
+  ['10.0.0.0', 8, 'private'], //          RFC 1918
+  ['100.64.0.0', 10, 'private'], //       RFC 6598 carrier-grade NAT
+  ['127.0.0.0', 8, 'loopback'],
+  ['169.254.0.0', 16, 'link-local'], //   incl. cloud metadata 169.254.169.254
+  ['172.16.0.0', 12, 'private'], //       RFC 1918
+  ['192.0.0.0', 24, 'reserved'], //       IETF protocol assignments
+  ['192.0.2.0', 24, 'reserved'], //       TEST-NET-1
+  ['192.168.0.0', 16, 'private'], //      RFC 1918
+  ['198.18.0.0', 15, 'reserved'], //      benchmarking
+  ['198.51.100.0', 24, 'reserved'], //    TEST-NET-2
+  ['203.0.113.0', 24, 'reserved'], //     TEST-NET-3
+  ['224.0.0.0', 4, 'multicast'],
+  ['240.0.0.0', 4, 'reserved'], //        incl. 255.255.255.255 broadcast
+];
+
+const ipv4ToInt = (ip) =>
+  ip.split('.').reduce((acc, octet) => ((acc << 8) + Number(octet)) >>> 0, 0);
+
+const classifyIpv4 = (ip) => {
+  const value = ipv4ToInt(ip);
+  for (const [network, prefix, label] of BLOCKED_IPV4_RANGES) {
+    const mask = (~0 << (32 - prefix)) >>> 0;
+    if (((value & mask) >>> 0) === ((ipv4ToInt(network) & mask) >>> 0)) return label;
+  }
+  return null;
+};
+
+/** Expands an IPv6 address into its eight 16-bit groups. */
+const expandIpv6 = (ip) => {
+  let address = ip.toLowerCase();
+  // Convert a trailing embedded IPv4 (e.g. ::ffff:10.0.0.1) into two groups.
+  const embedded = address.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (embedded) {
+    const v = ipv4ToInt(embedded[1]);
+    address = address.slice(0, -embedded[1].length)
+      + `${(v >>> 16).toString(16)}:${(v & 0xffff).toString(16)}`;
+  }
+  const [head, tail] = address.split('::');
+  const headGroups = head ? head.split(':') : [];
+  const tailGroups = tail ? tail.split(':') : [];
+  const groups = tail !== undefined
+    ? [...headGroups, ...Array(8 - headGroups.length - tailGroups.length).fill('0'), ...tailGroups]
+    : headGroups;
+  return groups.map((g) => parseInt(g, 16) || 0);
+};
+
+const embeddedIpv4 = (g) => [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join('.');
+
+const classifyIpv6 = (ip) => {
+  const g = expandIpv6(ip);
+
+  if (g.every((x) => x === 0)) return 'reserved'; //                            ::
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return 'loopback'; //  ::1
+
+  // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d) and NAT64
+  // (64:ff9b::a.b.c.d) addresses reach the embedded IPv4 host.
+  const zeroPrefix = g.slice(0, 5).every((x) => x === 0);
+  if (zeroPrefix && (g[5] === 0xffff || g[5] === 0)) return classifyIpv4(embeddedIpv4(g));
+  if (g[0] === 0x0064 && g[1] === 0xff9b) return classifyIpv4(embeddedIpv4(g));
+
+  if ((g[0] & 0xfe00) === 0xfc00) return 'private'; //      fc00::/7 unique local
+  if ((g[0] & 0xffc0) === 0xfe80) return 'link-local'; //   fe80::/10
+  if ((g[0] & 0xffc0) === 0xfec0) return 'private'; //      fec0::/10 site-local
+  if ((g[0] & 0xff00) === 0xff00) return 'multicast'; //    ff00::/8
+  if (g[0] === 0x2001 && g[1] === 0x0db8) return 'reserved'; // documentation
+  return null;
+};
+
 /**
- * Returns an error message string if `rawUrl` should be blocked as an SSRF
- * risk, or `null` if the URL is safe to request.
+ * Returns a label ('private', 'loopback', 'link-local', ...) when `ip` is not
+ * a public unicast address, `null` when it is public, or 'invalid' for
+ * non-IP input.
  *
- * Blocks:
- *  - Non-HTTPS schemes (http://, file://, ftp://, etc.)
- *  - Loopback addresses (127.0.0.0/8, ::1, [::1])
- *  - RFC 1918 private ranges (10/8, 172.16/12, 192.168/16)
- *  - Link-local (169.254/16, fe80::/10)
- *  - Hostname aliases for localhost
+ * @param {string} ip
+ * @returns {string|null}
+ */
+const classifyIpAddress = (ip) => {
+  const family = net.isIP(ip);
+  if (family === 4) return classifyIpv4(ip);
+  if (family === 6) return classifyIpv6(ip);
+  return 'invalid';
+};
+
+const blockedMessage = (label, rawUrl, detail = '') =>
+  `Webhook URL targets a ${label} address${detail} (SSRF blocked): ${rawUrl}`;
+
+/**
+ * Synchronous URL check: scheme, embedded credentials, localhost aliases and
+ * IP literals. Returns an error message when the URL must be blocked, or
+ * `null`. Hostnames are not resolved here; see {@link assertSafeWebhookUrl}.
  *
  * @param {string} rawUrl
  * @returns {string|null}
@@ -158,63 +256,88 @@ const detectSsrfTarget = (rawUrl) => {
     return `Webhook URL is not a valid URL: ${rawUrl}`;
   }
 
-  // Only HTTPS is permitted; reject http://, file://, ftp://, etc.
+  // Only HTTPS is permitted; reject http://, file://, ftp://, gopher://, etc.
   if (parsed.protocol !== 'https:') {
     return `Webhook URL must use HTTPS (got ${parsed.protocol}): ${rawUrl}`;
   }
 
-  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
-
-  // Block localhost aliases.
-  if (hostname === 'localhost' || hostname === 'localhost.localdomain') {
-    return `Webhook URL targets a loopback host (SSRF blocked): ${rawUrl}`;
+  if (parsed.username || parsed.password) {
+    return `Webhook URL must not contain credentials: ${parsed.origin}`;
   }
 
-  // Parse dotted-decimal IPv4 and check against blocked ranges.
-  const ipv4Parts = hostname.split('.');
-  if (ipv4Parts.length === 4 && ipv4Parts.every((p) => /^\d+$/.test(p))) {
-    const [a, b] = ipv4Parts.map(Number);
+  // WHATWG URL already normalises decimal/hex/octal IPv4 forms
+  // (https://2130706433/ -> 127.0.0.1), so IP literals are canonical here.
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 
-    // 127.0.0.0/8 — loopback
-    if (a === 127) {
-      return `Webhook URL targets a loopback address (SSRF blocked): ${rawUrl}`;
-    }
-    // 10.0.0.0/8 — RFC 1918 private
-    if (a === 10) {
-      return `Webhook URL targets a private address (SSRF blocked): ${rawUrl}`;
-    }
-    // 172.16.0.0/12 — RFC 1918 private
-    if (a === 172 && b >= 16 && b <= 31) {
-      return `Webhook URL targets a private address (SSRF blocked): ${rawUrl}`;
-    }
-    // 192.168.0.0/16 — RFC 1918 private
-    if (a === 192 && b === 168) {
-      return `Webhook URL targets a private address (SSRF blocked): ${rawUrl}`;
-    }
-    // 169.254.0.0/16 — link-local (AWS metadata service, etc.)
-    if (a === 169 && b === 254) {
-      return `Webhook URL targets a link-local address (SSRF blocked): ${rawUrl}`;
-    }
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === 'localhost.localdomain'
+  ) {
+    return blockedMessage('loopback', rawUrl, ' (localhost)');
   }
 
-  // IPv6 loopback (::1) and link-local (fe80::/10).
-  if (hostname === '::1' || hostname === '0:0:0:0:0:0:0:1') {
-    return `Webhook URL targets a loopback address (SSRF blocked): ${rawUrl}`;
-  }
-  if (/^fe[89ab][0-9a-f]:/i.test(hostname) || hostname.startsWith('fe80:')) {
-    return `Webhook URL targets a link-local address (SSRF blocked): ${rawUrl}`;
+  if (net.isIP(hostname)) {
+    const label = classifyIpAddress(hostname);
+    if (label) return blockedMessage(label, rawUrl);
   }
 
   return null;
+};
+
+const buildSsrfError = (message) =>
+  Object.assign(new Error(message), { code: SSRF_ERROR_CODE });
+
+/**
+ * Delivery-time URL validation. Runs {@link detectSsrfTarget}, then resolves
+ * the hostname and rejects it if ANY resolved address is non-public, so a
+ * public-looking hostname that points at 10.0.0.5 is refused too.
+ *
+ * @param {string} rawUrl
+ * @param {{ lookup?: Function }} [opts] DNS lookup override (tests)
+ * @throws {Error} with `code === 'SSRF_BLOCKED'` when the URL is rejected
+ */
+const assertSafeWebhookUrl = async (rawUrl, { lookup = dns.promises.lookup } = {}) => {
+  const syncError = detectSsrfTarget(rawUrl);
+  if (syncError) throw buildSsrfError(syncError);
+
+  const hostname = new URL(rawUrl).hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(hostname)) return; // IP literal already validated above.
+
+  let addresses;
+  try {
+    addresses = await lookup(hostname, { all: true, verbatim: true });
+  } catch (err) {
+    throw buildSsrfError(
+      `Webhook URL host could not be resolved (${err.code || err.message}): ${rawUrl}`,
+    );
+  }
+
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw buildSsrfError(`Webhook URL host resolved to no addresses: ${rawUrl}`);
+  }
+
+  for (const { address } of addresses) {
+    const label = classifyIpAddress(address);
+    if (label) {
+      throw buildSsrfError(blockedMessage(label, rawUrl, ` via DNS (${hostname} -> ${address})`));
+    }
+  }
 };
 
 const sendWebhook = async (url, payload, secret) => {
   // ── SSRF guard ─────────────────────────────────────────────────────────────
   // Reject non-HTTPS schemes and private/loopback IP targets before opening
   // any connection, so the worker cannot be used as an SSRF proxy.
+  // Hostnames are resolved and every address checked. Redirects are not
+  // followed, so a 3xx cannot bounce the request to an internal target.
+  await assertSafeWebhookUrl(url);
   const ssrfError = detectSsrfTarget(url);
   if (ssrfError) {
-    throw Object.assign(new Error(ssrfError), { code: 'SSRF_BLOCKED' });
+    throw Object.assign(new Error(ssrfError), {
+      code: 'SSRF_BLOCKED',
+      retryable: false,
+    });
   }
   // ── end SSRF guard ─────────────────────────────────────────────────────────
 
@@ -241,9 +364,15 @@ const sendWebhook = async (url, payload, secret) => {
       },
       body: rawBody,
       signal: controller.signal,
+      redirect: 'manual',
     });
     if (!response.ok) {
-      throw new Error(`Webhook responded with HTTP ${response.status}`);
+      throw Object.assign(
+        new Error(`Webhook responded with HTTP ${response.status}`),
+        {
+          retryable: [429, 500, 502, 503, 504].includes(response.status),
+        },
+      );
     }
     return { ok: true };
   } finally {
@@ -320,13 +449,71 @@ const applyWebhookPaymentIntentStatus = async ({
   return updatePaymentIntentStatus(prisma, paymentIntentId, nextStatus, data);
 };
 
+const recordWebhookEventAttempt = async (prisma, webhook, payload) => {
+  const serializedPayload = JSON.stringify(payload);
+  let event = await prisma.webhookEvent.findFirst({
+    where: {
+      eventType: payload.event,
+      payload: serializedPayload,
+      merchantId: webhook.id,
+    },
+    select: { id: true },
+  });
+
+  if (!event) {
+    event = await prisma.webhookEvent.create({
+      data: {
+        eventType: payload.event,
+        payload: serializedPayload,
+        merchantId: webhook.id,
+      },
+      select: { id: true },
+    });
+  }
+
+  await prisma.webhookEvent.update({
+    where: { id: event.id },
+    data: {
+      attemptCount: { increment: 1 },
+      status: 'pending',
+      lastError: null,
+      deliveredAt: null,
+    },
+  });
+
+  return event.id;
+};
+
+const markWebhookEventDeadLetter = async (prisma, webhook, payload, error) => {
+  const event = await prisma.webhookEvent.findFirst({
+    where: {
+      eventType: payload.event,
+      payload: JSON.stringify(payload),
+      merchantId: webhook.id,
+    },
+    select: { id: true },
+  });
+
+  if (event) {
+    await prisma.webhookEvent.update({
+      where: { id: event.id },
+      data: { status: 'dead_letter', lastError: error.message },
+    });
+  }
+};
+
 const processWebhookJob = async (job, { prisma, poolRunFn }) => {
   const { webhook, payload } = job.data;
   const now = new Date();
+  const webhookEventId = await recordWebhookEventAttempt(prisma, webhook, payload);
 
   try {
     await sendWebhook(webhook.url, payload, webhook.secret);
   } catch (error) {
+    await prisma.webhookEvent.update({
+      where: { id: webhookEventId },
+      data: { lastError: error.message },
+    });
     try {
       await markWebhookFailure(prisma, poolRunFn, webhook.id, now);
     } catch (databaseError) {
@@ -334,8 +521,25 @@ const processWebhookJob = async (job, { prisma, poolRunFn }) => {
         `[webhook-worker] Failed to mark failure for webhook ${webhook.id}: ${databaseError.message}`,
       );
     }
+
+    if (error && error.code === SSRF_ERROR_CODE) {
+      logger.warn(
+        { webhookId: webhook.id, eventId: payload?.event_id, reason: error.message },
+        `[webhook-worker] Delivery rejected for webhook ${webhook.id}: ${error.message}`,
+      );
+      // A disallowed URL never becomes deliverable by retrying, so fail the
+      // job permanently instead of burning the retry budget.
+      if (typeof UnrecoverableError === 'function') {
+        throw Object.assign(new UnrecoverableError(error.message), { code: SSRF_ERROR_CODE });
+      }
+    }
     throw error;
   }
+
+  await prisma.webhookEvent.update({
+    where: { id: webhookEventId },
+    data: { status: 'delivered', lastError: null, deliveredAt: now },
+  });
 
   try {
     await markWebhookSuccess(prisma, poolRunFn, webhook.id, now);
@@ -375,6 +579,9 @@ const processWebhookJob = async (job, { prisma, poolRunFn }) => {
 const getWebhookQueue = () => {
   if (!webhookQueue) {
     queueConnection = createRedisConnection();
+    if (!queueConnection) {
+      throw new Error('Redis is not configured (REDIS_URL is unset). Cannot create webhook queue.');
+    }
     webhookQueue = new Queue(WEBHOOK_QUEUE_NAME, { connection: queueConnection });
     webhookQueue.on('error', (error) => {
       logger.error(`[webhook-queue] Redis error: ${error.message}`);
@@ -387,25 +594,45 @@ const startWebhookWorker = ({ prisma, poolRunFn }) => {
   if (webhookWorker) return webhookWorker;
 
   workerConnection = createRedisConnection();
+  if (!workerConnection) {
+    throw new Error('Redis is not configured (REDIS_URL is unset). Cannot start webhook worker.');
+  }
   webhookWorker = new Worker(
     WEBHOOK_QUEUE_NAME,
     (job) => processWebhookJob(job, { prisma, poolRunFn }),
     {
       connection: workerConnection,
       concurrency: WEBHOOK_WORKER_CONCURRENCY,
+      settings: {
+        backoffStrategy: (attemptsMade, _type, error) =>
+          error?.retryable === false ? -1 : computeRetryDelay(attemptsMade),
+      },
     },
   );
 
   webhookWorker.on('failed', async (job, error) => {
     const maxAttempts = job?.opts?.attempts || MAX_WEBHOOK_ATTEMPTS;
-    const attemptsMade = job?.attemptsMade || 1;
+    const attemptsMade = job?.attemptsMade ?? 1;
 
-    if (attemptsMade >= maxAttempts && job?.data?.webhook) {
+    if (
+      (attemptsMade >= maxAttempts || error?.retryable === false) &&
+      job?.data?.webhook
+    ) {
       logger.error(`[webhook-worker] Delivery failed job=${job?.id || 'unknown'}: ${error.message}; retries exhausted (${attemptsMade}/${maxAttempts})`);
       try {
-        await moveToDLQ(prisma, poolRunFn, job.data.webhook);
+        await moveToDLQ(prisma, poolRunFn, job.data.webhook, error);
       } catch (dlqErr) {
         logger.error(`[webhook-worker] Failed to move webhook ${job.data.webhook.id} to DLQ: ${dlqErr.message}`);
+      }
+      try {
+        await markWebhookEventDeadLetter(
+          prisma,
+          job.data.webhook,
+          job.data.payload,
+          error,
+        );
+      } catch (eventErr) {
+        logger.error(`[webhook-worker] Failed to mark event dead letter for job=${job?.id || 'unknown'}: ${eventErr.message}`);
       }
     } else {
       const nextDelayMs = computeRetryDelay(attemptsMade + 1);
@@ -509,7 +736,7 @@ const closeWebhookQueue = async () => {
  * The webhook row itself is left intact so the user can re-register if needed;
  * only the delivery record is preserved for manual replay.
  */
-const moveToDLQ = async (prisma, poolRunFn, webhook) => {
+const moveToDLQ = async (prisma, poolRunFn, webhook, lastError = null) => {
   const payload = {
     event: 'webhook.delivery_failed',
     event_id: `dlq-${webhook.id}-${crypto.randomBytes(8).toString('hex')}`,
@@ -566,9 +793,41 @@ const moveToDLQ = async (prisma, poolRunFn, webhook) => {
   // The webhook stays registered; a new payment will retry fresh.
   await markWebhookSuccess(prisma, poolRunFn, webhook.id, now);
 
-  logger.info(
-    `[webhook-worker] Moved to DLQ: webhookId=${webhook.id} username=${webhook.username} url=${webhook.url}`,
-  );
+  const lastError = lastError && lastError.message ? lastError.message : (lastError ? String(lastError) : null);
+
+  // Emit a structured warning so operators can alert on DLQ transitions
+  // without polling the DLQ API.
+  logger.warn('Webhook moved to DLQ', {
+    webhookId: webhook.id,
+    eventId: payload.event_id,
+    username: webhook.username,
+    url: webhook.url,
+    lastError,
+  });
+
+  // Optionally notify an external operator endpoint when configured. Failures
+  // here must never prevent the DLQ write from succeeding, so they are
+  // swallowed and logged.
+  const notifyUrl = process.env.WEBHOOK_DLQ_NOTIFY_URL;
+  if (notifyUrl && typeof fetch === 'function') {
+    try {
+      await fetch(notifyUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: 'webhook.dlq',
+          webhookId: webhook.id,
+          eventId: payload.event_id,
+          username: webhook.username,
+          url: webhook.url,
+          lastError,
+          movedAt: now.toISOString(),
+        }),
+      });
+    } catch (notifyErr) {
+      logger.error(`[webhook-worker] Failed to POST DLQ notification: ${notifyErr.message}`);
+    }
+  }
 };
 
 /**
@@ -705,6 +964,9 @@ module.exports = {
   sendWebhook,
   computeSignature,
   detectSsrfTarget,
+  assertSafeWebhookUrl,
+  classifyIpAddress,
+  SSRF_ERROR_CODE,
   computeRetryDelay,
   WEBHOOK_TIMEOUT_MS,
   WEBHOOK_QUEUE_NAME,

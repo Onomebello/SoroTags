@@ -45,6 +45,9 @@ jest.mock('../src/cleanup-cron', () => ({ scheduleCleanupJob: jest.fn() }));
 jest.mock('../src/soft-delete-purge-cron', () => ({
   scheduleSoftDeletePurgeJob: jest.fn(),
 }));
+jest.mock('../src/middleware/deprecation', () => ({
+  deprecationMiddleware: () => (req, res, next) => next(),
+}));
 
 // Prisma mock — individual tests control .count and .create return values.
 const mockCount = jest.fn();
@@ -322,6 +325,19 @@ describe('POST /api/v1/register — validation and conflict handling', () => {
     expect(res.body.error.message).toMatch(/Secret Key/i);
   });
 
+  it('rejects an invalid Stellar address before making database writes', async () => {
+    const res = await request(app)
+      .post('/api/v1/register')
+      .set('Content-Type', 'application/json')
+      .send(makeRegisterPayload({ address: 'BADKEY' }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_INPUT');
+    expect(res.body.error.message).toBe('Invalid Stellar address');
+    expect(mockCount).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   it('returns 200 or 201 and includes username, address, is_primary, federation_address in response', async () => {
     mockCount.mockResolvedValue(0);
     mockCreate.mockResolvedValue({
@@ -343,6 +359,65 @@ describe('POST /api/v1/register — validation and conflict handling', () => {
       is_primary: expect.any(Boolean),
       federation_address: expect.stringContaining('alice123'),
     });
+  });
+});
+
+describe('POST /register — reserved usernames (issue #8)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCount.mockResolvedValue(0);
+    mockFindFirst.mockResolvedValue(null);
+    mockCreate.mockResolvedValue({ username: 'alice123', address: VALID_ADDRESS });
+  });
+
+  it.each(['admin', 'root', 'support', 'api', 'ADMIN', 'Root', 'SuPpOrT', 'aPi'])(
+    'returns 403 FORBIDDEN for reserved username %s on the versioned route',
+    async (username) => {
+      const res = await request(app)
+        .post('/api/v1/register')
+        .set('Content-Type', 'application/json')
+        .send(makeRegisterPayload({ username }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatchObject({
+        code: 'FORBIDDEN',
+        message: 'This username is reserved.',
+      });
+      expect(mockCount).not.toHaveBeenCalled();
+      expect(mockFindFirst).not.toHaveBeenCalled();
+      expect(mockCreate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['admin', 'root', 'support', 'api', 'ADMIN', 'Root', 'SuPpOrT', 'aPi'])(
+    'returns 403 FORBIDDEN for reserved username %s on the root route',
+    async (username) => {
+      const res = await request(app)
+        .post('/register')
+        .set('Content-Type', 'application/json')
+        .send(makeRegisterPayload({ username }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatchObject({
+        code: 'FORBIDDEN',
+        message: 'This username is reserved.',
+      });
+      expect(mockCount).not.toHaveBeenCalled();
+      expect(mockFindFirst).not.toHaveBeenCalled();
+      expect(mockCreate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('registers a non-reserved username successfully', async () => {
+    const res = await request(app)
+      .post('/api/v1/register')
+      .set('Content-Type', 'application/json')
+      .send(makeRegisterPayload({ username: 'ordinaryuser' }));
+
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+    expect(mockCount).toHaveBeenCalled();
+    expect(mockCreate).toHaveBeenCalled();
   });
 });
 

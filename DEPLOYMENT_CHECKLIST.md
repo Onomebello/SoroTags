@@ -32,3 +32,15 @@ Use this checklist for every deployment. Do not skip steps.
 - [ ] Verify the deployed version/commit matches the intended release
 - [ ] Monitor logs and metrics for errors
 - [ ] Notify the team that the deployment is complete
+
+## Setting up the `testnet` environment (one-time)
+
+1. Go to **Settings → Environments → New environment**, name it `testnet`.
+2. Under **Deployment protection rules**, enable **Required reviewers** and add
+   the accounts or teams that must approve Testnet deploys.
+3. Optionally set **Wait timer** (e.g. 5 minutes) to give reviewers time to react.
+4. Add `TESTNET_API_URL` as an environment secret (not a repository secret) so it
+   is scoped to Testnet deploys only.
+
+The `deploy-testnet.yml` workflow already declares `environment: testnet`, so
+it will block at the approval step once the environment is configured.

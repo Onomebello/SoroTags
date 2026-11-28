@@ -41,3 +41,7 @@ postgres_dev_data/
 *.db
 *.db-shm
 *.db-wal
+
+# Cypress run output
+payment-dashboard/cypress/screenshots/
+payment-dashboard/cypress/videos/

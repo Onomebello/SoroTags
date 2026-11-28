@@ -50,6 +50,7 @@ process.env.ADMIN_API_KEY = 'test-admin-key';
 
 // Load app after mocks are in place.
 const { app } = require('../server');
+const { prisma } = require('../prismaClient');
 const { getBucketKey, buildDateFilter, snapToWeekBoundary } = require('../src/services/statsService');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -403,6 +404,50 @@ describe('GET /admin/stats/routing', () => {
       // The gte date should have been expanded to 2026-08-31
       const call = mockFindMany.mock.calls[0][0];
       expect(call.where.createdAt.gte.toISOString().slice(0, 10)).toBe('2026-08-31');
+    });
+  });
+
+  describe('soft-deleted user exclusion (#120)', () => {
+    beforeEach(() => {
+      prisma.user.findMany.mockReset();
+      prisma.user.findMany.mockResolvedValue([]);
+    });
+
+    it('excludes payments routed to soft-deleted users from the query', async () => {
+      prisma.user.findMany.mockResolvedValueOnce([{ address: 'GDELETED1' }]);
+      mockFindMany.mockResolvedValueOnce([]);
+
+      await request(app)
+        .get('/api/v1/admin/stats/routing')
+        .set('x-api-key', 'test-admin-key');
+
+      const call = mockFindMany.mock.calls[0][0];
+      expect(call.where.toAddress).toEqual({ notIn: ['GDELETED1'] });
+    });
+
+    it('applies the exclusion on the assetCode-filtered path too', async () => {
+      prisma.user.findMany.mockResolvedValueOnce([{ address: 'GDELETED1' }]);
+      mockFindMany.mockResolvedValueOnce([]);
+
+      await request(app)
+        .get('/api/v1/admin/stats/routing?assetCode=USDC')
+        .set('x-api-key', 'test-admin-key');
+
+      const call = mockFindMany.mock.calls[0][0];
+      expect(call.where.assetCode).toBe('USDC');
+      expect(call.where.toAddress).toEqual({ notIn: ['GDELETED1'] });
+    });
+
+    it('does not add a toAddress filter when no users are soft-deleted', async () => {
+      prisma.user.findMany.mockResolvedValueOnce([]);
+      mockFindMany.mockResolvedValueOnce([]);
+
+      await request(app)
+        .get('/api/v1/admin/stats/routing')
+        .set('x-api-key', 'test-admin-key');
+
+      const call = mockFindMany.mock.calls[0][0];
+      expect(call.where.toAddress).toBeUndefined();
     });
   });
 });

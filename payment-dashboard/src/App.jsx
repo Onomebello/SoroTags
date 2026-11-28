@@ -1,8 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { toast, Toaster } from "react-hot-toast";
 import logger from "./logger";
 import LoadingSpinner from './components/LoadingSpinner';
+import Dialog from './components/Dialog';
+import WalletModal from './components/WalletModal';
 import { HORIZON_BASE, API_BASE, walletKit } from './views/shared';
 
 const Dashboard = lazy(() => import('./views/Dashboard.jsx'));
@@ -10,6 +12,39 @@ const HelpPage = lazy(() => import('./views/HelpPage.jsx'));
 const AnalyticsPage = lazy(() => import('./views/AnalyticsPage.jsx'));
 const HistoryPage = lazy(() => import('./views/HistoryPage.jsx'));
 const RegistrationPage = lazy(() => import('./views/RegistrationPage.jsx'));
+
+const KEYBOARD_SHORTCUTS = [
+  { keys: 'Alt+R', description: 'Go to Registration' },
+  { keys: 'Alt+H', description: 'Go to History' },
+  { keys: 'Alt+A', description: 'Go to Analytics' },
+  { keys: '?', description: 'Open this keyboard shortcuts dialog' },
+];
+
+const WALLET_STORAGE_KEY = 'stellar.wallet.publicKey';
+
+function readStoredWalletKey() {
+  try {
+    return localStorage.getItem(WALLET_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function persistWalletKey(publicKey) {
+  try {
+    localStorage.setItem(WALLET_STORAGE_KEY, publicKey);
+  } catch (err) {
+    logger.error('Failed to persist wallet key:', err);
+  }
+}
+
+function clearStoredWalletKey() {
+  try {
+    localStorage.removeItem(WALLET_STORAGE_KEY);
+  } catch (err) {
+    logger.error('Failed to clear stored wallet key:', err);
+  }
+}
 
 /**
  * Generate a unique request identifier.
@@ -70,68 +105,39 @@ function isTypingTarget(target) {
 
 function ShortcutsModal({ onClose }) {
   return (
-    <div
-      className="shortcuts-modal-backdrop"
-      role="presentation"
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 2000,
-      }}
-    >
-      <div
-        className="shortcuts-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="shortcuts-modal-title"
-        onClick={(event) => event.stopPropagation()}
-        style={{
-          backgroundColor: '#FFFFFF',
-          borderRadius: '8px',
-          padding: '24px',
-          minWidth: '320px',
-          maxWidth: '90vw',
-          boxShadow: '0 10px 30px rgba(0, 0, 0, 0.2)',
-        }}
-      >
-        <h2 id="shortcuts-modal-title" style={{ marginTop: 0 }}>
-          Keyboard Shortcuts
-        </h2>
-        <ul style={{ listStyle: 'none', padding: 0, margin: '16px 0' }}>
-          {KEYBOARD_SHORTCUTS.map((shortcut) => (
-            <li
-              key={shortcut.keys}
+    <Dialog className="shortcuts-modal" titleId="shortcuts-modal-title" onClose={onClose}>
+      <h2 id="shortcuts-modal-title" style={{ marginTop: 0 }}>
+        Keyboard Shortcuts
+      </h2>
+      <ul style={{ listStyle: 'none', padding: 0, margin: '16px 0' }}>
+        {KEYBOARD_SHORTCUTS.map((shortcut) => (
+          <li
+            key={shortcut.keys}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: '16px',
+              padding: '6px 0',
+            }}
+          >
+            <kbd
               style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                gap: '16px',
-                padding: '6px 0',
+                fontFamily: 'monospace',
+                backgroundColor: '#F3F4F6',
+                borderRadius: '4px',
+                padding: '2px 6px',
               }}
             >
-              <kbd
-                style={{
-                  fontFamily: 'monospace',
-                  backgroundColor: '#F3F4F6',
-                  borderRadius: '4px',
-                  padding: '2px 6px',
-                }}
-              >
-                {shortcut.keys}
-              </kbd>
-              <span>{shortcut.description}</span>
-            </li>
-          ))}
-        </ul>
-        <button type="button" onClick={onClose} autoFocus>
-          Close
-        </button>
-      </div>
-    </div>
+              {shortcut.keys}
+            </kbd>
+            <span>{shortcut.description}</span>
+          </li>
+        ))}
+      </ul>
+      <button type="button" onClick={onClose}>
+        Close
+      </button>
+    </Dialog>
   );
 }
 
@@ -204,49 +210,76 @@ const [activeView, setActiveView] = useState('dashboard')
     };
   }, []);
 
-  const handleConnectWallet = async () => {
+  const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
+  /** @type {import('react').MutableRefObject<((result: { ok: boolean, error?: string }) => void) | null>} */
+  const resolveWalletModalRef = useRef(null);
+
+  /**
+   * Closes the wallet dialog and settles the pending handleConnectWallet call.
+   * @param {{ ok: boolean, error?: string }} result
+   */
+  const settleWalletModal = (result) => {
+    setIsWalletModalOpen(false);
+    resolveWalletModalRef.current?.(result);
+    resolveWalletModalRef.current = null;
+  };
+
+  /**
+   * Opens the wallet dialog. Resolves once the user has connected a wallet,
+   * the connection failed, or the dialog was dismissed.
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  const handleConnectWallet = () =>
+    new Promise((resolve) => {
+      resolveWalletModalRef.current?.({ ok: false, error: "Wallet connection process cancelled." });
+      resolveWalletModalRef.current = resolve;
+      setIsWalletModalOpen(true);
+    });
+
+  const handleWalletModalClose = () => {
+    settleWalletModal({ ok: false, error: "Wallet connection process cancelled." });
+  };
+
+  /**
+   * @param {{ id: string }} option
+   */
+  const handleWalletSelected = async (option) => {
+    const resolve = resolveWalletModalRef.current;
+    resolveWalletModalRef.current = null;
+    setIsWalletModalOpen(false);
+
     try {
-      await walletKit.openModal({
-        onWalletSelected: async (option) => {
-          try {
-            walletKit.setWallet(option.id);
-            /** @type {Promise<never>} */
-            const timeoutPromise = new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('Wallet connection timed out')), WALLET_TIMEOUT_MS)
-            );
-            const addressResponse = await Promise.race([walletKit.getAddress(), timeoutPromise]);
-            
-            // Extract the key carefully to avoid the initialization error
-            const publicKey = typeof addressResponse === 'string' 
-              ? addressResponse 
-              : addressResponse.address;
-            
-            // Now that publicKey is officially created, we can fetch the user
-            const dbResponse = await withRequestId(`${API_BASE}/lookup?address=${encodeURIComponent(publicKey)}`);
-            
-            if (dbResponse.ok) {
-              setRegistrationState("existing");
-            } else if (dbResponse.status === 404) {
-              setRegistrationState("new");
-              handleNavigate("register");
-            }
+      walletKit.setWallet(option.id);
+      /** @type {Promise<never>} */
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Wallet connection timed out')), WALLET_TIMEOUT_MS)
+      );
+      const addressResponse = await Promise.race([walletKit.getAddress(), timeoutPromise]);
 
-            // Save the address to state so the UI updates
-            persistWalletKey(publicKey);
-            setUserPublicKey(publicKey);
-            logger.debug("Wallet connected successfully.");
-          } catch (err) {
-            logger.error("Wallet connection failed:", err);
-            toast.error("Failed to connect wallet.");
-          }
-        },
-      });
+      // Extract the key carefully to avoid the initialization error
+      const publicKey = typeof addressResponse === 'string'
+        ? addressResponse
+        : addressResponse.address;
 
-      return { ok: true };
-    } catch (error) {
-      toast.error("Connection cancelled.");
-      logger.error("User closed modal or an error occurred:", error);
-      return { ok: false, error: "Wallet connection process cancelled." };
+      // Now that publicKey is officially created, we can fetch the user
+      const dbResponse = await withRequestId(`${API_BASE}/lookup?address=${encodeURIComponent(publicKey)}`);
+
+      if (dbResponse.ok) {
+        setRegistrationState("existing");
+      } else if (dbResponse.status === 404) {
+        setRegistrationState("new");
+        handleNavigate("register");
+      }
+
+      // Save the address to state so the UI updates
+      persistWalletKey(publicKey);
+      setUserPublicKey(publicKey);
+      logger.debug("Wallet connected successfully.");
+      resolve?.({ ok: true });
+    } catch (err) {
+      logger.error("Wallet connection failed:", err);
+      toast.error("Failed to connect wallet.");
+      resolve?.({ ok: false, error: "Failed to connect wallet." });
     }
   };
 
@@ -408,6 +441,17 @@ const [activeView, setActiveView] = useState('dashboard')
     [activeView, handleNavigate],
   );
 
+  const dialogs = (
+    <>
+      {isShortcutsOpen && (
+        <ShortcutsModal onClose={() => setIsShortcutsOpen(false)} />
+      )}
+      {isWalletModalOpen && (
+        <WalletModal onSelect={handleWalletSelected} onClose={handleWalletModalClose} />
+      )}
+    </>
+  );
+
   if (activeView === "register" && (registrationState === "new" || registrationState === "skipped")) {
     return (
       <>
@@ -440,9 +484,7 @@ const [activeView, setActiveView] = useState('dashboard')
           onRegistered={() => handleRegistrationStateChange("existing")}
         />
         </Suspense>
-        {isShortcutsOpen && (
-          <ShortcutsModal onClose={() => setIsShortcutsOpen(false)} />
-        )}
+        {dialogs}
       </>
     );
   }
@@ -480,6 +522,7 @@ const [activeView, setActiveView] = useState('dashboard')
           canRegister={registrationState !== "existing"}
         />
         </Suspense>
+        {dialogs}
       </>
     );
   }
@@ -516,6 +559,7 @@ const [activeView, setActiveView] = useState('dashboard')
             canRegister={registrationState !== "existing"}
           />
         </Suspense>
+        {dialogs}
       </>
     );
   }
@@ -554,8 +598,9 @@ const [activeView, setActiveView] = useState('dashboard')
         />
       </Suspense>
       <Toaster position="bottom-right" />
+      {dialogs}
     </>
   );
 }
 
-/* … truncated 2006 chars — edit only what you need near the top … */
+export default App;

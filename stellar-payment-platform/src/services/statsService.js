@@ -128,6 +128,31 @@ const getRoutingStats = async ({
     where.assetCode = assetCode;
   }
 
+  // Exclude payments routed to soft-deleted users' addresses. A removed
+  // account's historical payment intents must not inflate the volume/count
+  // totals. Payments carry no user foreign key, so the exclusion is applied
+  // via the set of addresses belonging to soft-deleted users. The same filter
+  // applies on both the unfiltered and assetCode-filtered paths because it is
+  // added to the shared `where` clause above.
+  let deletedAddresses = [];
+  if (prisma.user && typeof prisma.user.findMany === 'function') {
+    try {
+      const deletedUsers = await prisma.user.findMany({
+        where: { deletedAt: { not: null } },
+        select: { address: true },
+      });
+      deletedAddresses = (deletedUsers || [])
+        .map((user) => user.address)
+        .filter((address) => typeof address === 'string' && address.length > 0);
+    } catch (error) {
+      if (!shouldFallbackToLocalRegistry(error)) throw error;
+      deletedAddresses = [];
+    }
+  }
+  if (deletedAddresses.length > 0) {
+    where.toAddress = { notIn: deletedAddresses };
+  }
+
   const records = await prisma.payment.findMany({
     where,
     select: {

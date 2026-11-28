@@ -33,6 +33,13 @@ jobs:
       - name: Run contract unit tests
         run: cargo test --features testutils -- --nocapture
 
+      - name: Fail if test snapshots drifted
+        run: |
+          if ! git diff --exit-code -- payment_router/test_snapshots/; then
+            echo "::error::Test snapshots are out of date. Run 'cargo test --features testutils' and commit the updated snapshots."
+            exit 1
+          fi
+
   bindings-check:
     name: Bindings up-to-date
     needs: contract-checks
