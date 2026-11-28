@@ -6,6 +6,8 @@ const { getFederationRecord } = require('../services/federation');
 const CACHE_CONTROL_SUCCESS = 'public, max-age=60, stale-while-revalidate=30';
 const CACHE_CONTROL_NOT_FOUND = 'no-store';
 
+const FEDERATION_QUERY_PATTERN = /^[^\s*]+\*[^\s*]+$/;
+
 function computeETag(body) {
   const hash = crypto.createHash('sha256').update(body).digest('hex');
   return `"${hash}"`;
@@ -18,6 +20,14 @@ router.get('/', async (req, res, next) => {
     if (!username) {
       res.set('Cache-Control', CACHE_CONTROL_NOT_FOUND);
       return res.status(400).json({ error: 'username query parameter is required' });
+    }
+
+    if (typeof username !== 'string' || !FEDERATION_QUERY_PATTERN.test(username)) {
+      res.set('Cache-Control', CACHE_CONTROL_NOT_FOUND);
+      return res.status(400).json({
+        error: 'INVALID_INPUT',
+        message: 'username must be in the format name*domain',
+      });
     }
 
     const record = await getFederationRecord(username);

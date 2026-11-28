@@ -1,25 +1,25 @@
 const { z } = require('zod');
 
 const DEFAULT_PAGE = 1;
-const DEFAULT_LIMIT = 50;
+const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 100;
 
 /**
  * Shared pagination query schema.
  *
- * Accepts `page` (default 1) and `limit` (default 50, clamped to a max of 100).
+ * Accepts `page` (default 1) and `limit` (default 10, clamped to a max of 100).
  * Values are coerced from query strings and validated as positive integers.
  */
 const paginationSchema = z.object({
   page: z.coerce
     .number()
     .int()
-    .positive()
+    .min(1)
     .default(DEFAULT_PAGE),
   limit: z.coerce
     .number()
     .int()
-    .positive()
+    .min(1)
     .max(MAX_LIMIT)
     .default(DEFAULT_LIMIT),
 });
